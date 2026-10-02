@@ -1,249 +1,134 @@
 import streamlit as st
 import pandas as pd
-from PIL import Image
-import plotly.express as px
 from gemini_service import ask_gemini
+from ml_tools import analyze_health_factors
+from datetime import date
+from food_tab import render_food_log_tab
+from trends_tab import render_trends_tab
+import database as db
+from stats import protein_guideline, build_summary
+import json
 
-# 1. ตั้งค่าหน้าเพจ
-st.set_page_config(page_title="Health Analytics Dashboard", page_icon="📊", layout="wide")
+st.set_page_config(page_title="AI Health Coach Pro", page_icon="💪", layout="wide")
+st.title("💪 AI Health Coach & Data Analytics")
+st.markdown("ระบบวิเคราะห์ข้อมูลทางสรีรวิทยาด้วย **Machine Learning** และจัดตารางโดย **Generative AI (Gemini)**")
 
-# 2. Custom CSS (ตกแต่งให้เป็นแอปมืออาชีพ เน้นตารางสวยงาม ลดความฉูดฉาด)
-st.markdown("""
-    <style>
-        @import url('https://fonts.googleapis.com/css2?family=Prompt:wght@300;400;500;600&display=swap');
-        html, body, [class*="css"] { font-family: 'Prompt', sans-serif; }
-        
-        #MainMenu, footer, header {visibility: hidden;} /* ซ่อนเมนู Streamlit */
-        
-        /* ตกแต่งตาราง (Markdown Table) ให้ดูเป็น Data Grid มืออาชีพ */
-        table {
-            width: 100%;
-            border-collapse: collapse;
-            margin: 16px 0;
-            font-size: 14px;
-        }
-        th {
-            background-color: #F8F9FA;
-            color: #333333;
-            font-weight: 600;
-            padding: 12px;
-            text-align: left;
-            border-bottom: 2px solid #DEE2E6;
-        }
-        td {
-            padding: 12px;
-            border-bottom: 1px solid #EEF0F2;
-            color: #495057;
-        }
-        tr:hover { background-color: #F8F9FA; }
-        
-        /* ตกแต่งกรอบ (Cards) */
-        div[data-testid="stVerticalBlock"] > div[style*="border"] {
-            border-radius: 10px;
-            border: 1px solid #E0E0E0;
-            box-shadow: 0px 2px 4px rgba(0, 0, 0, 0.02);
-            padding: 20px;
-        }
-    </style>
-""", unsafe_allow_html=True)
+@st.cache_data
+def load_data():
+    try:
+        # อ่านไฟล์ Dataset ของจริงจาก Kaggle
+        return pd.read_csv("gym_members_exercise_tracking.csv")
+    except FileNotFoundError:
+        st.error("❌ ไม่พบไฟล์ 'gym_members_exercise_tracking.csv' กรุณาตรวจสอบให้แน่ใจว่าไฟล์อยู่ในโฟลเดอร์เดียวกับโค้ด")
+        return None
 
-# 3. Header Dashboard
-st.markdown("## Health Analytics & Personalized Planning")
-st.markdown("<span style='color: #6C757D; font-size: 14px;'>Dashboard วิเคราะห์สุขภาพและวางแผนโภชนาการด้วยระบบ Data & AI Integration</span>", unsafe_allow_html=True)
-st.markdown("---")
+df = load_data()
 
-# ==========================================
-# แถบด้านข้าง (Sidebar): ข้อมูลและตารางเวลา
-# ==========================================
+# แถบด้านข้างสำหรับกรอกข้อมูล
 with st.sidebar:
-    st.markdown("### User Profile")
+    st.header("👤 ข้อมูลทางสรีรวิทยา")
+    gender = st.selectbox("เพศ", ["ชาย", "หญิง"])
+    age = st.number_input("อายุ (ปี)", min_value=15, max_value=80, value=22)
+    weight = st.number_input("น้ำหนัก (กก.)", min_value=30.0, max_value=150.0, value=65.0)
+    height = st.number_input("ส่วนสูง (ซม.)", min_value=140.0, max_value=200.0, value=170.0)
     
-    with st.container(border=True):
-        st.markdown("**1. ข้อมูลกายภาพ**")
-        col1, col2 = st.columns(2)
-        with col1:
-            gender = st.selectbox("เพศ", ["ชาย", "หญิง"])
-        with col2:
-            age = st.number_input("อายุ (ปี)", min_value=15, max_value=80, value=23)
-        weight = st.number_input("น้ำหนัก (kg)", min_value=30.0, max_value=150.0, value=85.0)
-        height = st.number_input("ส่วนสูง (cm)", min_value=140.0, max_value=200.0, value=193.0)
-    
-    with st.container(border=True):
-        st.markdown("**2. เป้าหมาย**")
-        activity = st.selectbox("ระดับกิจกรรม", [
-            "นั่งทำงานเป็นหลัก", 
-            "ขยับตัวบ้าง (1-3 วัน/สัปดาห์)", 
-            "ปานกลาง (3-5 วัน/สัปดาห์)", 
-            "แอคทีฟมาก (6-7 วัน/สัปดาห์)"
-        ])
-        goal = st.selectbox("เป้าหมายหลัก", ["ลดน้ำหนัก", "รักษาน้ำหนัก", "เพิ่มกล้ามเนื้อ"])
-        
-    with st.container(border=True):
-        st.markdown("**3. เวลาที่สะดวก (Availability)**")
-        st.caption("ระบบจะจัดตารางออกกำลังกายตามวันและเวลาว่างนี้")
-        days_available = st.multiselect(
-            "วันว่างในสัปดาห์", 
-            ["จันทร์", "อังคาร", "พุธ", "พฤหัสบดี", "ศุกร์", "เสาร์", "อาทิตย์"],
-            default=["จันทร์", "พุธ", "ศุกร์"]
-        )
-        time_available = st.slider("ระยะเวลาต่อวัน (นาที)", min_value=15, max_value=120, value=45, step=15)
+    activity_levels = {
+        "นั่งทำงานเป็นหลัก (ไม่ออกกำลังกาย)": 1.2,
+        "ขยับตัวบ้าง (ออกกำลังกาย 1-3 วัน/สัปดาห์)": 1.375,
+        "ปานกลาง (ออกกำลังกาย 3-5 วัน/สัปดาห์)": 1.55,
+        "แอคทีฟมาก (ออกกำลังกาย 6-7 วัน/สัปดาห์)": 1.725
+    }
+    activity = st.selectbox("ระดับกิจกรรม", list(activity_levels.keys()))
+    goal = st.selectbox("เป้าหมายของคุณ", ["ลดน้ำหนัก", "รักษาน้ำหนัก", "เพิ่มกล้ามเนื้อ"])
 
-# ==========================================
-# คำนวณคณิตศาสตร์ (Data Logic)
-# ==========================================
+# คำนวณค่าสุขภาพทางคณิตศาสตร์ 
 bmi = weight / ((height / 100) ** 2)
-bmr = (10 * weight) + (6.25 * height) - (5 * age) + (5 if gender == "ชาย" else - 161)
+if gender == "ชาย":
+    bmr = (10 * weight) + (6.25 * height) - (5 * age) + 5
+else:
+    bmr = (10 * weight) + (6.25 * height) - (5 * age) - 161
 
-act_multiplier = {"นั่งทำงานเป็นหลัก": 1.2, "ขยับตัวบ้าง (1-3 วัน/สัปดาห์)": 1.375, "ปานกลาง (3-5 วัน/สัปดาห์)": 1.55, "แอคทีฟมาก (6-7 วัน/สัปดาห์)": 1.725}
-tdee = bmr * act_multiplier[activity]
+tdee = bmr * activity_levels[activity]
 
-target_cal = tdee - 500 if goal == "ลดน้ำหนัก" else (tdee + 300 if goal == "เพิ่มกล้ามเนื้อ" else tdee)
-days_str = ", ".join(days_available) if days_available else "ไม่มีวันว่าง"
+if goal == "ลดน้ำหนัก":
+    target_cal = tdee - 500
+elif goal == "เพิ่มกล้ามเนื้อ":
+    target_cal = tdee + 300
+else:
+    target_cal = tdee
 
-# ==========================================
-# Tabs หลัก
-# ==========================================
+# สร้างฐานข้อมูล และบันทึกข้อมูล/เป้าหมายของวันนี้
+db.init_db()
+db.save_profile(date.today(), gender, age, weight, height, activity, goal, target_cal)
+protein_target = protein_guideline(weight, goal)
+
 tab1, tab2, tab3, tab4 = st.tabs([
-    "1. Personalized Plan", 
-    "2. Dynamic Tracker", 
-    "3. Predictive Analytics", 
-    "4. System Metrics"
+    "🤖 โค้ชสุขภาพ AI (Personalized Plan)",
+    "📊 วิเคราะห์สถิติคนเข้าฟิตเนส (Data Analytics)",
+    "🍽️ บันทึกอาหาร",
+    "📈 แนวโน้มของฉัน",
 ])
 
-# ---------------------------------------------------------
-# TAB 1: วิเคราะห์ & สร้างแผน (Obj 1 & 2)
-# ---------------------------------------------------------
-with tab1:
-    with st.container(border=True):
-        st.markdown("**ข้อมูลสรีรวิทยา (Physiological Metrics)**")
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("BMI", f"{bmi:.1f}")
-        col2.metric("BMR", f"{bmr:.0f} kcal")
-        col3.metric("TDEE", f"{tdee:.0f} kcal")
-        col4.metric("Target Calories", f"{target_cal:.0f} kcal/day")
-
-    with st.container(border=True):
-        st.markdown("**สร้างแผนสุขภาพเฉพาะบุคคล (Automated Planning)**")
-        if st.button("Generate Personalized Plan", type="primary"):
-            if not days_available:
-                st.warning("กรุณาระบุวันว่างก่อนทำการสร้างตาราง")
-            else:
-                with st.spinner("Processing Data..."):
-                    prompt = f"""
-                    คุณคือระบบประมวลผลข้อมูลฟิตเนส ห้ามใช้ Emoji และห้ามเขียนความเรียงทักทาย
-                    
-                    ข้อมูลผู้ใช้: เป้าหมาย {goal}, พลังงาน {target_cal:.0f} kcal/วัน
-                    วันว่าง: {days_str} (วันละ {time_available} นาที)
-                    
-                    กรุณาแสดงผลลัพธ์เป็น "Markdown Table" เท่านั้น 2 ตาราง:
-                    ตารางที่ 1: "แผนโภชนาการ (Nutrition Plan)" คอลัมน์: มื้ออาหาร | สัดส่วนที่แนะนำ | ตัวอย่างเมนู | แคลอรี่โดยประมาณ
-                    ตารางที่ 2: "แผนออกกำลังกาย (Workout Schedule)" คอลัมน์: วัน | ประเภทการฝึก | รายละเอียด (จำกัดเวลา {time_available} นาที) 
-                    (หมายเหตุ: จัดตารางเฉพาะวันที่ระบุไว้ นอกนั้นให้เขียนว่า 'พักผ่อน')
-                    """
-                    reply = ask_gemini(prompt) 
-                    st.markdown("### ผลการวิเคราะห์และวางแผน")
-                    st.markdown(reply)
-
-# ---------------------------------------------------------
-# TAB 2: สแกนอาหาร (Obj 3)
-# ---------------------------------------------------------
-with tab2:
-    with st.container(border=True):
-        st.markdown("**วิเคราะห์อาหารด้วย Vision AI (Meal Tracking)**")
-        st.caption("ประเมินโภชนาการเพื่อปรับสมดุลแคลอรี่ในมื้อถัดไป")
-        
-        uploaded_file = st.file_uploader("Upload Meal Image (JPG, PNG)", type=["jpg", "png"])
-        
-        if uploaded_file is not None:
-            image = Image.open(uploaded_file)
-            col1, col2 = st.columns([1, 2])
-            with col1:
-                # แก้ไขเป็น use_container_width=True แล้วครับ ตรงจุดที่ Error!
-                st.image(image, caption="ภาพถ่ายมื้ออาหาร", use_container_width=True)
-            with col2:
-                if st.button("Analyze Image"):
-                    with st.spinner("Scanning..."):
-                        prompt_text = f"""
-                        ห้ามใช้ Emoji ห้ามเขียนความเรียง ตอบเป็น "Markdown Table" เท่านั้น
-                        เป้าหมายแคลอรี่ต่อวันของผู้ใช้คือ {target_cal:.0f} kcal
-                        ตารางคอลัมน์: ข้อมูล | รายละเอียด
-                        ข้อมูลที่ต้องการในตาราง: 
-                        1. ชื่อเมนู (คาดการณ์)
-                        2. พลังงาน (kcal)
-                        3. โปรตีน (g)
-                        4. คาร์บ (g)
-                        5. ไขมัน (g)
-                        6. คำแนะนำสำหรับมื้อถัดไป (เช่น ต้องลดแป้ง หรือ เพิ่มโปรตีน)
-                        """
-                        reply = ask_gemini(prompt_text, image=image)
-                        st.markdown(reply)
-
-# ---------------------------------------------------------
-# TAB 3: พยากรณ์ (Obj 4)
-# ---------------------------------------------------------
 with tab3:
-    with st.container(border=True):
-        st.markdown("**พยากรณ์การเปลี่ยนแปลงน้ำหนักตัว (12-Week Projection)**")
-        st.caption("คำนวณจากส่วนต่างแคลอรี่เป้าหมายและหลักการสรีรวิทยา")
-        
-        cal_diff = target_cal - tdee
-        weight_change_per_week = (cal_diff * 7) / 7700 
-        
-        weeks = list(range(0, 13))
-        projected_weights = [weight + (weight_change_per_week * w) for w in weeks]
-        df_forecast = pd.DataFrame({"Week": weeks, "Projected Weight (kg)": projected_weights})
-        
-        fig = px.line(df_forecast, x="Week", y="Projected Weight (kg)", markers=True)
-        fig.update_layout(
-            plot_bgcolor="rgba(0,0,0,0)", 
-            xaxis=dict(showgrid=False),
-            yaxis=dict(gridcolor='rgba(200,200,200,0.2)'),
-            margin=dict(l=20, r=20, t=20, b=20)
-        )
-        fig.update_traces(line_color='#4A90E2', marker=dict(size=8))
-        
-        col1, col2 = st.columns([3, 1])
-        with col1:
-            st.plotly_chart(fig, use_container_width=True)
-        with col2:
-            st.markdown("<br><br>", unsafe_allow_html=True)
-            st.metric("Caloric Diff (Daily)", f"{cal_diff:.0f} kcal")
-            st.metric("Expected Change/Week", f"{weight_change_per_week:.2f} kg")
-            st.metric("Weight in Week 12", f"{projected_weights[-1]:.1f} kg")
+    render_food_log_tab(target_cal)
 
-# ---------------------------------------------------------
-# TAB 4: ประเมินระบบ (Obj 5 - Dashboard Style)
-# ---------------------------------------------------------
 with tab4:
-    st.markdown("**System Performance & Evaluation Metrics**")
-    st.caption("แดชบอร์ดตรวจสอบประสิทธิภาพและความน่าเชื่อถือของระบบปัญญาประดิษฐ์ (System Evaluation)")
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        with st.container(border=True):
-            st.markdown("**Mathematical & Logic Layer**")
-            st.markdown("ความแม่นยำในการคำนวณโครงสร้างสรีรวิทยา")
-            st.progress(100)
-            st.caption("Score: 100% (คำนวณผ่าน Hard-coded Harris-Benedict Equation ไม่มีความคลาดเคลื่อน)")
-            
-            st.markdown("<br>", unsafe_allow_html=True)
-            
-            st.markdown("**Predictive Analytics Reliability**")
-            st.markdown("ความสมเหตุสมผลของการพยากรณ์ล่วงหน้า")
-            st.progress(98)
-            st.caption("Score: 98% (อ้างอิงจากกฎ 7,700 kcal / 1 kg แปรผันตามข้อมูล User จริง)")
+    render_trends_tab(target_cal, goal, weight, protein_target)
 
-    with col2:
-        with st.container(border=True):
-            st.markdown("**LLM Adherence (Generative AI)**")
-            st.markdown("การตอบสนองตรงตาม Prompt และหลีกเลี่ยงข้อผิดพลาด (Hallucination)")
-            st.progress(95)
-            st.caption("Score: 95% (จำกัดบริบทการตอบด้วยตาราง Markdown ป้องกันข้อมูลนอกเรื่อง)")
+with tab1:
+    st.subheader("🎯 ข้อมูลทางสรีรวิทยาและการเผาผลาญ")
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("BMI (ดัชนีมวลกาย)", f"{bmi:.1f}")
+    col2.metric("BMR (พลังงานพื้นฐาน)", f"{bmr:.0f} kcal")
+    col3.metric("TDEE (พลังงานที่ใช้จริง)", f"{tdee:.0f} kcal")
+    col4.metric("เป้าหมายแคลอรี่/วัน", f"{target_cal:.0f} kcal", goal)
+
+    st.divider()
+    use_history = st.checkbox("📊 ให้โค้ชใช้ข้อมูลที่ฉันบันทึกไว้ (14 วันล่าสุด) ในการปรับแผน", value=True)
+    if st.button("✨ ให้ AI จัดสัดส่วนสารอาหารและตารางออกกำลังกาย", type="primary"):
+        with st.spinner("AI กำลังวิเคราะห์ข้อมูลของคุณ (ใช้เวลาเพียง 1-3 วินาที)..."):
+            history_block = ""
+            if use_history:
+                hist = build_summary(14, target_cal, protein_target, goal)
+                if hist["days_logged"] >= 3:
+                    history_block = (
+                        "\n            ข้อมูลที่ผู้ใช้บันทึกจริงย้อนหลัง (คำนวณแล้ว ใช้เฉพาะตัวเลขนี้ ห้ามแต่งตัวเลขเพิ่ม):\n"
+                        + json.dumps(hist, ensure_ascii=False)
+                        + "\n            ให้ปรับสัดส่วนอาหารและแผนออกกำลังกายโดยอ้างอิงพฤติกรรมจริงนี้ เช่น จุดที่ทำได้ดีและจุดที่ควรปรับ\n"
+                    )
+                else:
+                    st.info("ข้อมูลที่บันทึกยังน้อยกว่า 3 วัน จึงสร้างแผนจากข้อมูลร่างกายอย่างเดียวก่อน")
             
-            st.markdown("<br>", unsafe_allow_html=True)
+            # Prompt สำหรับส่งให้ Gemini
+            prompt = f"""
+            คุณเป็นผู้เชี่ยวชาญด้านโภชนาการและเทรนเนอร์ฟิตเนสระดับมืออาชีพ ตอบเป็นภาษาไทยให้อ่านง่าย จัดหน้าสวยงาม
+            ข้อมูลผู้ใช้: เพศ{gender} อายุ {age} ปี เป้าหมายคือ {goal}
+            ค่า BMI = {bmi:.1f}, BMR = {bmr:.0f} kcal, พลังงานที่ต้องการต่อวัน = {target_cal:.0f} kcal
+            {history_block}
+            1. ช่วยแจกแจงสัดส่วน Macronutrients (โปรตีน, คาร์บ, ไขมัน) เป็นกรัม ให้พอดีกับเป้าหมาย {target_cal:.0f} kcal
+            2. ออกแบบตารางอาหาร 1 วันที่สอดคล้องกับสัดส่วนด้านบน
+            3. แนะนำตารางออกกำลังกายที่เหมาะกับระดับกิจกรรม '{activity}'
+            """
             
-            st.markdown("**Vision Recognition Rate**")
-            st.markdown("ความแม่นยำในการแยกแยะภาพอาหารและสารอาหาร")
-            st.progress(90)
-            st.caption("Score: ~90% (ขึ้นอยู่กับคุณภาพความคมชัดของภาพที่ผู้ใช้อัปโหลด)")
+            # กำหนด model="gemini-3.8-flash" ให้ตรงกับระบบปัจจุบัน
+            reply = ask_gemini(prompt, model="gemini-3.8-flash")
+            st.success("✅ โค้ช AI จัดตารางเสร็จสิ้น!")
+            st.markdown(reply)
+
+with tab2:
+    st.subheader("📈 วิเคราะห์สถิติข้อมูลของจริง (Gym Members Dataset)")
+    st.write("โมเดล Machine Learning วิเคราะห์ว่า **ปัจจัยใดมีความสำคัญต่อการเผาผลาญแคลอรี่มากที่สุด**")
+    
+    if df is not None:
+        r2, fig = analyze_health_factors(df)
+        
+        col_a, col_b = st.columns([1, 2])
+        with col_a:
+            st.info(f"**ความน่าเชื่อถือของโมเดล (R-Squared):** {r2*100:.2f}%")
+            st.write("**Insight (ข้อค้นพบ):**")
+            st.write("จากข้อมูลจริงพบว่า 'เวลาที่ใช้ในการออกกำลังกาย (ชั่วโมง)' มีผลต่อการเผาผลาญพลังงานมากกว่าน้ำหนักตัวหรืออายุเสียอีก")
+            with st.expander("ดูชุดข้อมูลดิบของจริง (10 แถวแรก)"):
+                st.dataframe(df.head(10))
+                
+        with col_b:
+            st.plotly_chart(fig, use_container_width=True)
